@@ -3392,6 +3392,15 @@ def _ensure_session_db_row(session: dict) -> None:
             # means the launch/default profile (matches run_agent's convention).
             profile_name=Path(profile_home).name if profile_home else None,
         )
+        # Enrich git_branch/git_repo_root through the same generation-guarded
+        # probe the cwd-change paths use. Until now create passed cwd and
+        # stopped, so every row was born with NULL git_branch — and the sidebar,
+        # given no recorded branch, fell back to a hardcoded "main" lane that
+        # doesn't exist on master-trunk repos. Best-effort and daemon: a failed
+        # probe leaves the columns unset, it never delays session creation.
+        _persisted_cwd = _persisted_session_cwd(session)
+        if _persisted_cwd:
+            _persist_session_cwd_and_schedule_git_meta(session, _persisted_cwd, db=db)
         # A session can be born hidden (session.create hidden=true, or a
         # session.set_hidden that arrived before the row existed): apply the
         # deferred intent now that the row exists, mirroring pending_title.

@@ -221,6 +221,8 @@ def test_unrecorded_and_recorded_main_share_one_lane():
     main_lanes = [g for repo in project["repos"] for g in repo["groups"] if g["label"] == "main"]
 
     assert len(main_lanes) == 1
+    # The empty git_branch row still folds into the recorded "main" lane — only
+    # the *no-real-branch-known* case stops fabricating "main", not this merge.
     assert main_lanes[0]["id"] == "/repo::branch::main"
     assert len(main_lanes[0]["sessions"]) == 2
 
@@ -296,8 +298,8 @@ def test_non_git_cwd_preserves_legacy_workspace_grouping():
     assert project["label"] == "notes"
     assert project["sessionCount"] == 1
     # Branch-style lane id (#53329): keying this lane by the raw path used to
-    # fork a duplicate lane against the live overlay's `::branch::main` id.
-    assert _lane_ids(project) == ["/work/notes::branch::main"]
+    # fork a duplicate lane against the live overlay's `::branch::` id.
+    assert _lane_ids(project) == ["/work/notes::branch::"]
     assert tree["scoped_session_ids"] == [legacy["id"]]
 
 
@@ -510,6 +512,9 @@ def test_deleted_sibling_worktree_folds_into_parent_home_checkout():
     project = tree["projects"][0]
 
     assert [p["id"] for p in tree["projects"]] == ["/www/hermes-agent"]
+    # The branchless sibling still folds into the parent's recorded "main" lane
+    # (one lane per checkout) — the fabrication stop only changes the label when
+    # NO real branch is known.
     assert _lane_ids(project) == ["/www/hermes-agent::branch::main"]
     main = project["repos"][0]["groups"][0]
     assert main["isMain"] and main["path"] == "/www/hermes-agent"
@@ -626,8 +631,8 @@ def test_non_git_folder_lane_matches_overlay_scheme():
     """#53329: verify the lane key format matches what the overlay expects."""
     result = pt._place_by_heuristic("/data/work/folder-x")
     assert result is not None
-    # Overlay expects: <path>::branch::main
-    expected = "/data/work/folder-x::branch::main"
+    # Overlay expects: <path>::branch::  (empty branch bucket, no fabricated "main")
+    expected = "/data/work/folder-x::branch::"
     assert result["lane_key"] == expected, (
         f"Expected lane_key={expected!r} but got {result['lane_key']!r}"
     )

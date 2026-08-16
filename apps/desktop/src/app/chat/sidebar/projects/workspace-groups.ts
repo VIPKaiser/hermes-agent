@@ -112,8 +112,16 @@ export function kanbanWorktreeDir(path: string): null | string {
   return path.match(KANBAN_DIR_RE)?.[1] ?? null
 }
 
-/** Label for a main-checkout lane whose session recorded no branch. */
-export const DEFAULT_BRANCH_LABEL = 'main'
+/** Label for a main-checkout lane whose branch is unknown.
+ *
+ * Deliberately NOT a branch name: when no branch is recorded and the cwd can't
+ * be probed, the truth is "unknown". Defaulting to `main` invents a branch that
+ * may not exist on master/trunk/develop repos — the sidebar then offers a
+ * switch-to-main that git rejects. Empty = the `<repo>::branch::` bucket, which
+ * the live worktree probe relabels once it knows the real branch. Must match
+ * the backend's `project_tree.DEFAULT_BRANCH_LABEL`.
+ */
+export const DEFAULT_BRANCH_LABEL = ''
 
 /** Id of the Home bucket (must match the backend tree's `NO_PROJECT_ID`). */
 export const NO_PROJECT_ID = '__no_project__'

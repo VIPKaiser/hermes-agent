@@ -3196,6 +3196,12 @@ def _(rid, params: dict) -> dict:
                     else None
                 ),
             )
+            # Same git_branch enrichment as _ensure_session_db_row: a branch row
+            # is born from db.create_session here, not from that path, so without
+            # this call it too would sit on NULL git_branch forever.
+            _branch_cwd = _session_cwd(session)
+            if _branch_cwd:
+                _persist_session_cwd_and_schedule_git_meta(session, _branch_cwd, db=db)
             # Copy the whole parent history in bounded-chunk transactions —
             # a branch seed can be hundreds of rows, and per-row transactions
             # were the write-amplification pattern removed in #23254.

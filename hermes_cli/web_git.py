@@ -637,9 +637,16 @@ def _default_branch(cwd: str) -> str:
     ).strip().replace("origin/", "", 1)
     if remote:
         return remote
+    # init.defaultBranch is what `git init` would NAME a fresh trunk, not proof
+    # one exists — a repo whose trunk is master with the config set to main
+    # would otherwise flag a nonexistent `main` as default, and the branch
+    # picker would offer a `git switch main` that git rejects. Only trust the
+    # config when the ref is actually there; else fall to the trunk scan.
     configured = _git_out(cwd, ["config", "--get", "init.defaultBranch"]).strip()
     if configured:
-        return configured
+        code, _, _ = _git(cwd, ["rev-parse", "--verify", "--quiet", f"refs/heads/{configured}"])
+        if code == 0:
+            return configured
     for branch in _TRUNK_BRANCHES:
         if _git_out(cwd, ["show-ref", "--verify", f"refs/heads/{branch}"]).strip():
             return branch

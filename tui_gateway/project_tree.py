@@ -47,7 +47,13 @@ Exists = Callable[[str], bool]
 # `.worktrees/` stay as their own lanes.
 _KANBAN_DIR_RE = re.compile(r"^(.*[/\\]\.worktrees)[/\\]t_[0-9a-f]+[/\\]?$")
 _TRUNK_BRANCHES = {"main", "master", "trunk", "develop"}
-DEFAULT_BRANCH_LABEL = "main"
+# Lane label for a main-checkout session whose branch is unknown. Deliberately
+# NOT a branch name: when no branch is recorded and the cwd can't be probed,
+# the truth is "unknown", and defaulting to "main" invents a branch that may
+# not exist on master/trunk/develop repos (the sidebar then offers a
+# switch-to-main that git rejects). Empty = fold into the ``::branch::`` bucket
+# and let the desktop relabel from its live worktree probe.
+DEFAULT_BRANCH_LABEL = ""
 
 # The synthetic bucket holding every session no project claimed — a chat with no
 # cwd at all, or one whose folder can't be promoted (the bare home dir, HERMES
@@ -392,6 +398,27 @@ def _build_repos(sessions: list[dict], resolve: Optional[Resolve], hydrate: bool
         repo["sessionCount"] += count
 
     repo_list = list(repos.values())
+
+    # One main-checkout lane per repo for the UNKNOWN-branch bucket. An
+    # unknown-branch session now lands in the empty ``::branch::`` lane instead
+    # of a fabricated "main" — but a repo whose real branch sessions recorded
+    # ("main", "bb/live", …) must absorb that bucket, else the root dir shows
+    # two main lanes for one checkout. Real recorded branches (feature, …) are
+    # deliberately kept as their own lanes; only the empty bucket folds. This
+    # mirrors the desktop's `isHome` collapse so a remote backend (no live
+    # probe) doesn't split.
+    for repo in repo_list:
+        mains = [g for g in repo["groups"] if g.get("isMain")]
+        if len(mains) > 1:
+            empty = [g for g in mains if not g["label"]]
+            named = [g for g in mains if g["label"]]
+            if empty and named:
+                winner = named[0]
+                for loser in empty:
+                    winner["sessions"].extend(loser["sessions"])
+                    winner["sessions"].sort(key=_session_time, reverse=True)
+                    repo["groups"].remove(loser)
+
     for repo in repo_list:
         repo["groups"] = _sort_lanes(repo["groups"])
         _disambiguate_labels(repo["groups"])
