@@ -44,26 +44,45 @@ def _flatten_choice(c) -> str:
     """Coerce a single choice into its user-facing display string.
 
     The schema declares choices as bare strings, but LLMs sometimes emit
-    dict-shaped choices like ``[{"description": "..."}]``. A naive ``str(c)``
-    turns the whole dict into its Python repr — ``{'description': '...'}`` —
+    dict-shaped choices like ``[{"description": "..."}]`` or JSON-string
+    wrappers like ``'{"value":"Use CCBill"}'``. A naive ``str(c)`` turns
+    the whole dict into its Python/JSON repr — ``{'value': '...'}`` —
     which then leaks onto every surface that renders the choice (CLI panel,
-    Discord buttons, Telegram numbered list) AND is returned verbatim as the
-    user's answer. Normalising here, at the one platform-agnostic entry point,
-    fixes the whole class in one place instead of per-adapter.
+    Discord buttons, Telegram numbered list, desktop card) AND is returned
+    verbatim as the user's answer. Normalising here, at the one
+    platform-agnostic entry point, fixes the whole class in one place
+    instead of per-adapter.
 
     Dict unwrap order is the canonical LLM tool-call user-facing keys:
-    ``label`` → ``description`` → ``text`` → ``title``. ``name`` and ``value``
-    are deliberately excluded — they're component-shaped fields that could
-    carry raw enum values or short identifiers, not human-readable labels. A
-    dict with none of the canonical keys is dropped (returns ""), since a
-    garbage label is worse than no choice at all.
+    ``label`` → ``description`` → ``text`` → ``title``. ``value`` then
+    ``name`` are last-resort — models commonly emit ``{"value": "the
+    label"}`` (and schema-string coercion JSON-serialises that dict). A
+    dict with none of those keys is dropped (returns ""), since a garbage
+    label is worse than no choice at all.
     """
     if c is None:
         return ""
     if isinstance(c, str):
-        return c.strip()
+        s = c.strip()
+        if len(s) >= 2 and s[0] == "{" and s[-1] == "}":
+            parsed = None
+            try:
+                parsed = json.loads(s)
+            except (ValueError, TypeError):
+                try:
+                    import ast
+                    parsed = ast.literal_eval(s)
+                except (ValueError, TypeError, SyntaxError):
+                    return s
+            if isinstance(parsed, dict):
+                return _flatten_choice(parsed)
+        return s
     if isinstance(c, dict):
         for key in ("label", "description", "text", "title"):
+            v = c.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        for key in ("value", "name"):
             v = c.get(key)
             if isinstance(v, str) and v.strip():
                 return v.strip()

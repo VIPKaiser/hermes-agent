@@ -165,6 +165,24 @@ describe('normalizeChoices', () => {
     expect(normalizeChoices(['', '  ', null, undefined])).toEqual([])
     expect(normalizeChoices([])).toEqual([])
   })
+
+  it('unwraps {value} objects to the inner label', () => {
+    expect(normalizeChoices([{ value: 'Use CCBill' }, { value: 'Stars' }])).toEqual([
+      'Use CCBill',
+      'Stars'
+    ])
+  })
+
+  it('unwraps JSON-string {value} wrappers', () => {
+    expect(normalizeChoices(['{"value":"Use CCBill"}', '{"value":"Telegram Stars"}'])).toEqual([
+      'Use CCBill',
+      'Telegram Stars'
+    ])
+  })
+
+  it('prefers label over value', () => {
+    expect(normalizeChoices([{ label: 'Visible', value: 'id' }])).toEqual(['Visible'])
+  })
 })
 
 describe('normalizeQuestions', () => {

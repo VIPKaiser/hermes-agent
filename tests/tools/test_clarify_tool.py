@@ -124,7 +124,7 @@ class TestClarifyDictChoices:
             choices=[
                 {"choice": "Tight", "description": "Tight, covers all 3 points"},
                 {"description": "Loose layout"},
-                {"name": "modelid", "value": "abc"},  # dropped, not leaked
+                {"name": "modelid", "value": "abc"},  # value is last-resort label
                 "A plain string choice",
             ],
             callback=cb,
@@ -132,11 +132,41 @@ class TestClarifyDictChoices:
         assert seen == [
             "Tight, covers all 3 points (Recommended)",
             "Loose layout",
+            "abc",
             "A plain string choice",
         ]
         # and the resolved answer is clean text, not a dict repr
         assert result["user_response"] == "Tight, covers all 3 points"
         assert "{" not in result["user_response"]
+        assert all("{" not in c for c in result["choices_offered"])
+
+
+    def test_flatten_unwraps_json_string_value_wrapper(self):
+        """Schema-string coercion JSON-serialises {value: label} into a string.
+
+        Desktop then rendered '{"value":"…"}' as the button label. Unwrap it.
+        """
+        assert _flatten_choice('{"value":"Use CCBill"}') == "Use CCBill"
+        assert _flatten_choice({"value": "Use CCBill"}) == "Use CCBill"
+        assert _flatten_choice('{"label":"Visible","value":"id"}') == "Visible"
+        assert _flatten_choice("{'value': 'Use CCBill'}") == "Use CCBill"
+
+
+    def test_json_string_choices_reach_callback_as_clean_text(self):
+        seen = []
+
+        def cb(question, choices):
+            seen.extend(choices or [])
+            return choices[0]
+
+        result = json.loads(clarify_tool(
+            "Payment?",
+            choices=['{"value":"CCBill primary"}', '{"value":"Telegram Stars"}'],
+            callback=cb,
+        ))
+        assert seen[0] == "CCBill primary (Recommended)"
+        assert seen[1] == "Telegram Stars"
+        assert result["user_response"] == "CCBill primary"
         assert all("{" not in c for c in result["choices_offered"])
 
 

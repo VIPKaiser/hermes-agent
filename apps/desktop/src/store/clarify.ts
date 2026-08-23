@@ -34,21 +34,66 @@ export const RECOMMENDED_LABEL = '(Recommended)'
 export const bareChoice = (choice: string): string =>
   choice.endsWith(RECOMMENDED_LABEL) ? choice.slice(0, -RECOMMENDED_LABEL.length).trim() : choice
 
+const CHOICE_LABEL_KEYS = ['label', 'description', 'text', 'title', 'value', 'name'] as const
+
+/**
+ * Coerce one choice into the user-facing label.
+ *
+ * Tool-args on the desktop card arrive *before* the backend flatten, and
+ * models emit dicts (`{value: "Use CCBill"}`) or JSON-string wrappers
+ * (`'{"value":"Use CCBill"}'`). Showing those as `{"value":"…"}` is the
+ * Atlas 2026-08-23 bug. Mirror `tools.clarify_tool._flatten_choice`.
+ */
+export function flattenChoice(raw: unknown): string {
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed: unknown = JSON.parse(trimmed)
+
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return flattenChoice(parsed)
+        }
+      } catch {
+        return trimmed
+      }
+    }
+
+    return trimmed
+  }
+
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const row = raw as Record<string, unknown>
+
+    for (const key of CHOICE_LABEL_KEYS) {
+      const value = row[key]
+
+      if (typeof value === 'string' && value.trim()) {
+        return value.trim()
+      }
+    }
+  }
+
+  return ''
+}
+
 /**
  * Validate and normalize a choices array.
  *
- * Keeps non-blank, newline-free strings of length ≤ 200; drops everything else
- * and returns an empty array when nothing usable survives — the caller then
- * falls back to a free-text answer instead of dead buttons.
+ * Unwraps dict / JSON-string choices to their label, then keeps non-blank,
+ * newline-free strings of length ≤ 200; drops everything else and returns
+ * an empty array when nothing usable survives — the caller then falls back
+ * to a free-text answer instead of dead buttons.
  */
 export function normalizeChoices(choices: unknown): string[] {
   if (!Array.isArray(choices)) {
     return []
   }
 
-  return choices.filter(
-    (c): c is string => typeof c === 'string' && c.trim().length > 0 && bareChoice(c).length <= 200 && !c.includes('\n')
-  )
+  return choices
+    .map(flattenChoice)
+    .filter(c => c.length > 0 && bareChoice(c).length <= 200 && !c.includes('\n'))
 }
 
 /**
