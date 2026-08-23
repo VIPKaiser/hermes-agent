@@ -309,6 +309,18 @@ class TestActiveVenvMarkerStripping:
         assert "VIRTUAL_ENV" not in result
         assert "CONDA_PREFIX" not in result
 
+    def test_make_run_env_pops_malloc_stack_logging(self):
+        from tools.environments.local import _make_run_env
+        poison = {
+            "PATH": "/usr/bin",
+            "MallocStackLogging": "1",
+            "MallocStackLoggingNoCompact": "1",
+        }
+        with patch.dict(os.environ, poison, clear=True):
+            result = _make_run_env({})
+        assert "MallocStackLogging" not in result
+        assert "MallocStackLoggingNoCompact" not in result
+
     def test_sanitize_subprocess_env_strips_markers(self):
         from tools.environments.local import _sanitize_subprocess_env
         base = {"VIRTUAL_ENV": "/venv", "CONDA_PREFIX": "/conda", "HOME": "/home/user"}

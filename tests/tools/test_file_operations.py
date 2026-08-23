@@ -9,6 +9,9 @@ from unittest.mock import MagicMock
 
 from tools.file_operations import (
     _is_write_denied,
+    _parse_sha256,
+    _first_integer_line,
+    _probe_not_regular,
     ReadResult,
     WriteResult,
     PatchResult,
@@ -17,6 +20,7 @@ from tools.file_operations import (
     LintResult,
     ShellFileOperations,
     MAX_LINE_LENGTH,
+    NOT_REGULAR_SENTINEL,
     normalize_read_pagination,
     normalize_search_pagination,
 )
@@ -898,3 +902,27 @@ class TestEscapeNativeToolArg:
         assert node_cmds, f"no node command captured in: {commands}"
         assert "'C:/Users/alice/app/main.js'" in node_cmds[0]
         assert "/c/Users" not in node_cmds[0]
+
+
+class TestNoiseTolerantParsers:
+    def test_parse_sha256_skips_msl_prefix(self):
+        digest = "a" * 64
+        stdout = (
+            "bash(1) MallocStackLogging: recording malloc stacks using lite mode\n"
+            f"{digest}  /tmp/x\n"
+        )
+        assert _parse_sha256(stdout) == digest
+        assert _parse_sha256(stdout.strip().split()[0]) is None  # naive split is the bug
+
+    def test_first_integer_line_skips_noise(self):
+        assert _first_integer_line(
+            "bash(1) MallocStackLogging: recording\n39\n"
+        ) == 39
+        assert _first_integer_line("not a number\n") is None
+
+    def test_probe_not_regular_on_any_line(self):
+        assert _probe_not_regular(NOT_REGULAR_SENTINEL) is True
+        assert _probe_not_regular(
+            f"bash(1) MallocStackLogging: x\n{NOT_REGULAR_SENTINEL}\n"
+        ) is True
+        assert _probe_not_regular("42\n") is False

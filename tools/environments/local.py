@@ -1339,6 +1339,13 @@ def _make_run_env(env: dict) -> dict:
 
     run_env = _scrub_delegated_child_kanban_env(run_env)
 
+    # macOS 27 enables lite-mode malloc stack logging on mere PRESENCE of
+    # these vars (value ignored, even "no"). Strip them from the Popen env
+    # so bash itself does not emit MSL lines at spawn — the wrapper ``unset``
+    # is too late for the shell process's own init. Harmless elsewhere.
+    run_env.pop("MallocStackLogging", None)
+    run_env.pop("MallocStackLoggingNoCompact", None)
+
     return run_env
 
 

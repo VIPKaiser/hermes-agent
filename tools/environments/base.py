@@ -51,6 +51,25 @@ _activity_callback_local = threading.local()
 # path for both bounded and unbounded modes.
 _UNBOUNDED_CAPTURE_CHARS = 2**63 - 1
 
+# macOS 27 libmalloc lite-mode spam. Presence of MallocStackLogging (value
+# ignored) makes every spawned process emit ``comm(pid) MallocStackLogging: …``
+# on stderr. Hermes merges stderr into stdout, so those lines contaminate
+# ``cat``/``sha256sum``/``wc`` captures and produce spurious post-write
+# verification failures. Strip at the capture boundary so file ops and the
+# terminal tool both see clean payloads. Optional ``N|`` prefix covers
+# read_file's line-numbered gutter. Idempotent.
+_MSL_LINE_RE = re.compile(
+    r"^(?:\d{1,6}\|)?(?:[A-Za-z0-9_.+\-]+\(\d+\) )?MallocStackLogging:[^\n]*\n?",
+    re.MULTILINE,
+)
+
+
+def strip_malloc_stack_logging(text: str) -> str:
+    """Remove macOS 27 MallocStackLogging stderr lines from captured output."""
+    if not text or "MallocStackLogging" not in text:
+        return text
+    return _MSL_LINE_RE.sub("", text)
+
 
 class EnvironmentConnectionError(RuntimeError):
     """Infrastructure/connection-class failure of a terminal backend.
@@ -582,6 +601,11 @@ def _export_dump_excluding_session_vars(
         # harness value arriving via the process env, exactly like the
         # session-var leak this dump already guards against.
         "AI_AGENT HERMES_AGENT "
+        # MallocStackLogging{,NoCompact}: macOS 27 beta enables lite-mode
+        # malloc stack logging on mere presence of the variable, making every
+        # spawned process emit noise lines to stderr.  Never persist it into
+        # snapshots (the _wrap_command unset keeps it out of live commands).
+        "MallocStackLogging MallocStackLoggingNoCompact "
         f"HERMES_UI_SESSION_ID{extra_unset} 2>/dev/null; "
         "export -p; "
         ") || true; } "
@@ -901,6 +925,20 @@ class BaseEnvironment(ABC):
                 f'else unset {name}; fi'
             )
             parts.append(f"unset {present} {value}")
+
+        # macOS 27 (Tahoe) beta injects MallocStackLogging into GUI-session
+        # process environments, and the beta enables "lite mode" malloc stack
+        # logging on mere PRESENCE of the variable (value ignored, even
+        # "no").  Every spawned process then emits two MallocStackLogging
+        # lines to stderr — which we merge into stdout — corrupting captured
+        # command output, cat-based file reads, and the sha256 post-write
+        # verification in file_operations (noise appended after the payload
+        # → "Post-write verification failed" false negatives, and
+        # noise baked into files written from polluted reads).  Strip it so
+        # tool subprocesses run quiet; harmless elsewhere.
+        parts.append(
+            "unset MallocStackLogging MallocStackLoggingNoCompact 2>/dev/null || true"
+        )
 
         # Harness attribution: every tool subprocess advertises that it runs
         # under Hermes via the cross-agent ``AI_AGENT`` standard (read by e.g.
@@ -1456,6 +1494,14 @@ class BaseEnvironment(ABC):
             proc, timeout=effective_timeout, bounded_capture=bounded_capture
         )
         self._update_cwd(result)
+        # After CWD-marker strip: drop MallocStackLogging lines so every
+        # consumer (terminal tool, file ops ``cat``/hash/size) sees the
+        # command payload, not libmalloc init/exit noise.
+        output = result.get("output")
+        if output:
+            cleaned = strip_malloc_stack_logging(output)
+            if cleaned is not output:
+                result["output"] = cleaned
 
         return result
 

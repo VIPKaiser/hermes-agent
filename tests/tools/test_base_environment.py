@@ -6,7 +6,11 @@ init_session() failure handling, and the CWD marker contract.
 
 from unittest.mock import MagicMock
 
-from tools.environments.base import BaseEnvironment, _BoundedOutputCollector
+from tools.environments.base import (
+    BaseEnvironment,
+    _BoundedOutputCollector,
+    strip_malloc_stack_logging,
+)
 
 
 class _TestableEnv(BaseEnvironment):
@@ -405,3 +409,26 @@ class TestCwdMarker:
         env1 = _TestableEnv()
         env2 = _TestableEnv()
         assert env1._cwd_marker != env2._cwd_marker
+
+
+class TestStripMallocStackLogging:
+    def test_strips_comm_pid_line(self):
+        payload = "hello\n"
+        noise = (
+            "bash(12345) MallocStackLogging: recording malloc "
+            "(and VM allocation) stacks using lite mode\n"
+        )
+        assert strip_malloc_stack_logging(noise + payload) == payload
+
+    def test_strips_gutter_prefixed_line(self):
+        noise = "12|mktemp(99) MallocStackLogging: turning off stack logging\n"
+        assert strip_malloc_stack_logging(noise + "body\n") == "body\n"
+
+    def test_leaves_prose_mentions(self):
+        text = "see MallocStackLogging in ~/.zshenv\n"
+        assert strip_malloc_stack_logging(text) == text
+
+    def test_wrap_command_unsets_msl(self):
+        env = _TestableEnv()
+        wrapped = env._wrap_command("echo hello", "/tmp")
+        assert "unset MallocStackLogging" in wrapped

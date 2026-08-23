@@ -801,6 +801,46 @@ DEFAULT_SEARCH_LIMIT = 50
 # `wc -c` prints only digits, so this can never collide with a real size.
 NOT_REGULAR_SENTINEL = "__hermes_not_regular__"
 
+_SHA256_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
+
+
+def _parse_sha256(stdout: str) -> Optional[str]:
+    """Extract a SHA-256 hex digest from command output, ignoring noise.
+
+    ``split()[0]`` is wrong when MallocStackLogging (or any other stderr
+    merge) prefixes the ``sha256sum``/``shasum`` line — the first token
+    becomes ``bash(123)`` and every write looks like a persistence failure.
+    """
+    if not stdout:
+        return None
+    match = _SHA256_RE.search(stdout)
+    return match.group(0).lower() if match else None
+
+
+def _first_integer_line(text: str) -> Optional[int]:
+    """First line that is only an integer, or None.
+
+    Size/line-count probes (``wc -c``, ``wc -l``) print a single number.
+    MSL noise on adjacent lines must not make ``int(stdout.strip())`` raise
+    and collapse the size to 0 (which ``read_file`` then treats as empty).
+    """
+    if not text:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
+def _probe_not_regular(text: str) -> bool:
+    """True when the size-probe sentinel appears on any line of *text*."""
+    if not text:
+        return False
+    if text.strip() == NOT_REGULAR_SENTINEL:
+        return True
+    return any(line.strip() == NOT_REGULAR_SENTINEL for line in text.splitlines())
+
 
 def _coerce_int(value: Any, default: int) -> int:
     """Best-effort integer coercion for tool pagination inputs."""
@@ -953,8 +993,16 @@ class ShellFileOperations(FileOperations):
         # defense-in-depth for any other stdin caller.
         if result.get("stdin_error") and exit_code == 0:
             exit_code = 1
+        stdout = result.get("output", "") or ""
+        # Capture-boundary strip is also in BaseEnvironment.execute; this
+        # second pass covers mock envs and any backend that skips it.
+        try:
+            from tools.environments.base import strip_malloc_stack_logging
+            stdout = strip_malloc_stack_logging(stdout)
+        except Exception:
+            pass
         return ExecuteResult(
-            stdout=result.get("output", ""),
+            stdout=stdout,
             exit_code=exit_code
         )
     
@@ -1498,12 +1546,12 @@ class ShellFileOperations(FileOperations):
             return self._suggest_similar_files(path)
 
         stat_output = _strip_terminal_fence_leaks(stat_result.stdout)
-        if stat_output.strip() == NOT_REGULAR_SENTINEL:
+        if _probe_not_regular(stat_output):
             return self._not_regular_error(path)
-        try:
-            file_size = int(stat_output.strip())
-        except ValueError:
-            file_size = 0
+        file_size = _first_integer_line(stat_output)
+        if file_size is None:
+            native = self._host_file_bytes(path)
+            file_size = len(native) if native is not None else 0
         
         # Check if file is too large
         if file_size > MAX_FILE_SIZE:
@@ -1597,9 +1645,8 @@ class ShellFileOperations(FileOperations):
         wc_cmd = f"wc -l < {self._escape_shell_arg(path)}"
         wc_result = self._exec(wc_cmd)
         wc_output = _strip_terminal_fence_leaks(wc_result.stdout)
-        try:
-            total_lines = int(wc_output.strip())
-        except ValueError:
+        total_lines = _first_integer_line(wc_output)
+        if total_lines is None:
             total_lines = 0
         
         # Check if truncated
@@ -1623,7 +1670,7 @@ class ShellFileOperations(FileOperations):
         # indistinguishable, from inside the model, from a broken tool —
         # it re-reads, widens the window, tries another path. Name the
         # dead end and its recovery instead.
-        if file_size == 0:
+        if file_size == 0 and not read_output:
             return ReadResult(
                 content="",
                 total_lines=0,
@@ -1764,12 +1811,12 @@ class ShellFileOperations(FileOperations):
         if stat_result.exit_code != 0:
             return self._suggest_similar_files(path)
         stat_output = _strip_terminal_fence_leaks(stat_result.stdout)
-        if stat_output.strip() == NOT_REGULAR_SENTINEL:
+        if _probe_not_regular(stat_output):
             return self._not_regular_error(path)
-        try:
-            file_size = int(stat_output.strip())
-        except ValueError:
-            file_size = 0
+        file_size = _first_integer_line(stat_output)
+        if file_size is None:
+            native = self._host_file_bytes(path)
+            file_size = len(native) if native is not None else 0
         if self._is_image(path):
             return ReadResult(is_image=True, is_binary=True, file_size=file_size)
         sample_bytes = self._sample_file_bytes(path)
@@ -1806,12 +1853,14 @@ class ShellFileOperations(FileOperations):
         if stat_result.exit_code != 0:
             return ReadResult(error=f"File not found: {path}")
         stat_output = _strip_terminal_fence_leaks(stat_result.stdout)
-        if stat_output.strip() == NOT_REGULAR_SENTINEL:
+        if _probe_not_regular(stat_output):
             return self._not_regular_error(path)
-        try:
-            file_size = int(stat_output.strip())
-        except ValueError:
-            return ReadResult(error=f"Could not determine file size: {path}")
+        file_size = _first_integer_line(stat_output)
+        if file_size is None:
+            native = self._host_file_bytes(path)
+            if native is None:
+                return ReadResult(error=f"Could not determine file size: {path}")
+            file_size = len(native)
         if max_bytes is not None and file_size > max_bytes:
             return ReadResult(
                 file_size=file_size,
@@ -2138,24 +2187,37 @@ class ShellFileOperations(FileOperations):
         # mismatch is surfaced as a hard error instead of silent corruption
         # (mirrors patch_replace's post-write verification).
         content_verified: Optional[bool] = None
+        quoted = self._escape_shell_arg(path)
         try:
-            hash_cmd = f"sha256sum {self._escape_shell_arg(path)} 2>/dev/null"
+            # GNU sha256sum first; macOS default is shasum -a 256.
+            hash_cmd = (
+                f"{{ sha256sum {quoted} 2>/dev/null "
+                f"|| shasum -a 256 {quoted} 2>/dev/null; }}"
+            )
             hash_result = self._exec(hash_cmd)
             if hash_result.exit_code == 0 and hash_result.stdout.strip():
-                disk_sha = hash_result.stdout.strip().split()[0]
+                disk_sha = _parse_sha256(hash_result.stdout)
                 expected_sha = hashlib.sha256(content_bytes).hexdigest()
-                content_verified = disk_sha == expected_sha
-                if not content_verified:
-                    return WriteResult(
-                        error=(
-                            f"Post-write verification failed for {path}: on-disk "
-                            "content hash differs from the intended write. The "
-                            "write did not persist correctly — re-read the file "
-                            "and retry."
-                        )
-                    )
+                if disk_sha:
+                    content_verified = disk_sha == expected_sha
         except Exception:
             content_verified = None
+
+        if content_verified is not True:
+            native = self._host_file_bytes(path)
+            if native is not None:
+                content_verified = native == content_bytes
+            if content_verified is False:
+                return WriteResult(
+                    bytes_written=bytes_written,
+                    dirs_created=dirs_created,
+                    error=(
+                        f"Post-write verification failed for {path}: on-disk "
+                        "content hash differs from the intended write. The "
+                        "write did not persist correctly — re-read the file "
+                        "and retry."
+                    ),
+                )
 
         # Post-write lint with delta refinement.
         lint_result = self._check_lint_delta(path, pre_content=pre_content, post_content=content)
@@ -2303,13 +2365,25 @@ class ShellFileOperations(FileOperations):
         _verify_stdout_normalized = _verify_bomless.replace("\r\n", "\n").replace("\r", "\n")
         _new_content_normalized = new_content.replace("\r\n", "\n").replace("\r", "\n")
         if _verify_stdout_normalized != _new_content_normalized:
-            return PatchResult(error=(
-                f"Post-write verification failed for {path}: on-disk content "
-                f"differs from intended write "
-                f"(wrote {len(_new_content_normalized)} chars, read back "
-                f"{len(_verify_stdout_normalized)} chars after normalizing line endings). "
-                "The patch did not persist. Re-read the file and try again."
-            ))
+            native = self._host_file_bytes(path)
+            native_ok = False
+            if native is not None:
+                try:
+                    native_text = native.decode("utf-8", "surrogateescape")
+                except Exception:
+                    native_text = None
+                if native_text is not None:
+                    native_bomless, _ = _strip_bom(native_text)
+                    native_normalized = native_bomless.replace("\r\n", "\n").replace("\r", "\n")
+                    native_ok = native_normalized == _new_content_normalized
+            if not native_ok:
+                return PatchResult(error=(
+                    f"Post-write verification failed for {path}: on-disk content "
+                    f"differs from intended write "
+                    f"(wrote {len(_new_content_normalized)} chars, read back "
+                    f"{len(_verify_stdout_normalized)} chars after normalizing line endings). "
+                    "The patch did not persist. Re-read the file and try again."
+                ))
 
         # Generate diff
         diff = self._unified_diff(content, new_content, path)
@@ -2582,6 +2656,21 @@ class ShellFileOperations(FileOperations):
         except Exception:  # noqa: BLE001
             return False
         return isinstance(env, LocalEnvironment)
+
+    def _host_file_bytes(self, path: str) -> Optional[bytes]:
+        """Read *path* via Python when this backend is the host filesystem.
+
+        Fallback for post-write verification and size probes when shell
+        capture is polluted (macOS 27 MallocStackLogging) or ``sha256sum``
+        is missing. Returns None on remote/sandboxed backends — those
+        cannot see the host path.
+        """
+        if not self._lsp_local_only():
+            return None
+        try:
+            return Path(path).read_bytes()
+        except OSError:
+            return None
 
     def _lsp_handles_extension(self, ext: str) -> bool:
         """Return True iff some registered LSP server claims this extension.
